@@ -531,7 +531,7 @@ impl ChatTranslation {
 					)));
 				};
 				return Ok(RenderedChatRequest {
-					body: conversion::bedrock_invoke::translate(&req)?,
+					body: conversion::bedrock_invoke::translate(&req, ctx.headers)?,
 					provider_state: Some(ProviderState::BedrockInvokeModel),
 				});
 			},
