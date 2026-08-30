@@ -14,13 +14,25 @@
 //! `typed::ContentBlock`'s `#[serde(other)]` arm re-serializes an unknown block
 //! as `{"type":"unknown"}` — corrupting a `tool_reference` rather than merely
 //! losing it. The weak `types::messages` structs carry `#[serde(flatten)] rest`
-//! at every level, so unknown fields round-trip untouched and a future beta needs
-//! no code change here.
+//! at every level, so nested content and tool definitions round-trip untouched
+//! and a new block or tool field needs no code change here.
 //!
-//! The beta list stays in the `anthropic-beta` header. Bedrock rejects
-//! `anthropic_beta: ["advanced-tool-use-2025-11-20"]` in an InvokeModel body with
-//! 400 `invalid beta flag`, while accepting the same value as a header (probed
-//! live 2026-08-30), and the gateway forwards client headers to Bedrock as-is.
+//! The **top level** is the exception, because Bedrock's Anthropic schema closes
+//! it: an unrecognized key returns 400 `<key>: Extra inputs are not permitted`.
+//! Forwarding a full Claude Code body verbatim therefore trades a client-side
+//! parse failure for an upstream validation failure — `context_management` is the
+//! first field to hit this, and would not be the last. So top-level keys are
+//! filtered against [`DEFAULT_INVOKE_BODY_FIELDS`] and dropped keys are logged by
+//! name, rather than blacklisting each offender as it surfaces in production.
+//!
+//! The beta list stays in the `anthropic-beta` header, which Bedrock ignores
+//! entirely — even an invented value returns 200, and tool search works with no
+//! beta header at all (probed live 2026-08-30). Its *body* counterpart is
+//! validated, and under different names (`tool-search-tool-2025-10-19`, not
+//! `advanced-tool-use-2025-11-20`), so `anthropic_beta` values are filtered too.
+
+use std::collections::HashSet;
+use std::sync::{LazyLock, Mutex};
 
 use agent_core::strng;
 use axum_core::body::Body;
@@ -29,11 +41,157 @@ use bytes::Bytes;
 
 use crate::parse::aws_sse;
 use crate::types::messages::typed as messages_typed;
+use tracing::{debug, warn};
+
 use crate::{AIError, StreamingUsageGuard, types};
 
 /// Bedrock requires this in the body; it identifies the Anthropic API contract
 /// rather than a model version.
 const BEDROCK_ANTHROPIC_VERSION: &str = "bedrock-2023-05-31";
+
+/// Top-level body fields Bedrock's Anthropic InvokeModel schema accepts.
+///
+/// Bedrock closes the top level: an unrecognized key is rejected outright with
+/// `<key>: Extra inputs are not permitted`, so forwarding one can never succeed
+/// and dropping it is the only behaviour that can. That is the opposite of the
+/// nested case — content blocks and tool definitions pass through permissively,
+/// which is why `tool_reference` and `defer_loading` survive — so the filter is
+/// deliberately confined to this one level.
+///
+/// Filtering here rather than enumerating known-bad keys is what keeps each new
+/// client-side beta field from becoming its own production 400. Claude Code sends
+/// several Bedrock does not model (`context_management`, `mcp_servers`,
+/// `container`, `betas`, `tool_search_server`); all are dropped by omission.
+///
+/// The accepted set is model-dependent (probed 2026-08-30: `service_tier` is in
+/// Opus 5's schema but not Sonnet 4.6's), and `temperature`/`top_p`/`top_k` are
+/// schema-valid but rejected as deprecated by some models — so those stay, and a
+/// value-level rejection is left to Bedrock rather than guessed at here.
+const DEFAULT_INVOKE_BODY_FIELDS: &[&str] = &[
+	"anthropic_beta",
+	"anthropic_version",
+	"max_tokens",
+	"messages",
+	"metadata",
+	"output_config",
+	"stop_sequences",
+	"system",
+	"temperature",
+	"thinking",
+	"tool_choice",
+	"tools",
+	"top_k",
+	"top_p",
+];
+
+/// Sentinel expanding to [`DEFAULT_INVOKE_BODY_FIELDS`] inside the env override,
+/// matching the convention `AGENTGATEWAY_BEDROCK_ANTHROPIC_BETA_HEADERS` uses.
+const DEFAULT_SENTINEL: &str = "default";
+
+/// `AGENTGATEWAY_BEDROCK_INVOKE_BODY_FIELDS` overrides the allowlist, so a field
+/// Bedrock starts accepting can be let through without a new build.
+static ALLOWED_BODY_FIELDS: LazyLock<HashSet<String>> = LazyLock::new(|| {
+	match std::env::var("AGENTGATEWAY_BEDROCK_INVOKE_BODY_FIELDS") {
+		Ok(raw) => raw
+			.split(',')
+			.map(str::trim)
+			.filter(|f| !f.is_empty())
+			.flat_map(|f| {
+				if f == DEFAULT_SENTINEL {
+					DEFAULT_INVOKE_BODY_FIELDS
+						.iter()
+						.map(|s| s.to_string())
+						.collect::<Vec<_>>()
+				} else {
+					vec![f.to_string()]
+				}
+			})
+			.collect(),
+		Err(_) => DEFAULT_INVOKE_BODY_FIELDS
+			.iter()
+			.map(|s| s.to_string())
+			.collect(),
+	}
+});
+
+/// Field names already reported, so a dropped field is named once rather than on
+/// every request. Bounded by the allowlist's complement, which is tiny in practice.
+static REPORTED_DROPS: LazyLock<Mutex<HashSet<String>>> =
+	LazyLock::new(|| Mutex::new(HashSet::new()));
+
+/// Drop top-level fields Bedrock will not accept, naming each one the first time.
+///
+/// A silent drop and a 400 are both failures, but only one is diagnosable; the
+/// log line is what makes "this beta is not reaching Bedrock" distinguishable from
+/// the next unrelated incident.
+fn retain_supported_fields(body: &mut serde_json::Map<String, serde_json::Value>) {
+	let dropped: Vec<String> = body
+		.keys()
+		.filter(|k| !ALLOWED_BODY_FIELDS.contains(k.as_str()))
+		.cloned()
+		.collect();
+	if dropped.is_empty() {
+		return;
+	}
+	for field in &dropped {
+		body.remove(field);
+	}
+	let fresh: Vec<&String> = {
+		let mut reported = REPORTED_DROPS.lock().expect("drop set is never poisoned");
+		dropped.iter().filter(|f| reported.insert((*f).clone())).collect()
+	};
+	if !fresh.is_empty() {
+		warn!(
+			"bedrock invoke: dropping request fields the Anthropic InvokeModel schema \
+			 rejects: {}. Set AGENTGATEWAY_BEDROCK_INVOKE_BODY_FIELDS to override.",
+			fresh
+				.iter()
+				.map(|f| f.as_str())
+				.collect::<Vec<_>>()
+				.join(", ")
+		);
+	}
+	debug!("bedrock invoke: dropped fields {dropped:?}");
+}
+
+/// Drop `anthropic_beta` values Bedrock does not recognize.
+///
+/// Bedrock validates this field's values where it ignores the `anthropic-beta`
+/// header outright (probed 2026-08-30: an unknown header value is accepted, an
+/// unknown body value is 400 `invalid beta flag`), and the names differ from
+/// Anthropic's — tool search is `tool-search-tool-2025-10-19` here, not
+/// `advanced-tool-use-2025-11-20`. A client that puts the list in the body would
+/// otherwise take the whole request down. Reuses the Converse path's allowlist so
+/// there is one place to update, `AGENTGATEWAY_BEDROCK_ANTHROPIC_BETA_HEADERS`
+/// included. Removing the key entirely when nothing survives keeps an empty array
+/// from reading as "betas explicitly disabled".
+fn retain_supported_beta_values(body: &mut serde_json::Map<String, serde_json::Value>) {
+	let Some(serde_json::Value::Array(values)) = body.get("anthropic_beta") else {
+		return;
+	};
+	let allowed = super::bedrock::helpers::allowed_beta_values();
+	let kept: Vec<serde_json::Value> = values
+		.iter()
+		.filter(|v| {
+			v.as_str()
+				.is_some_and(|s| allowed.iter().any(|a| a == s))
+		})
+		.cloned()
+		.collect();
+	if kept.len() == values.len() {
+		return;
+	}
+	debug!(
+		"bedrock invoke: filtered anthropic_beta from {} to {} recognized values",
+		values.len(),
+		kept.len()
+	);
+	if kept.is_empty() {
+		body.remove("anthropic_beta");
+	} else {
+		body.insert("anthropic_beta".to_string(), serde_json::Value::Array(kept));
+	}
+}
 
 /// Render an Anthropic-native `InvokeModel` body.
 ///
@@ -51,6 +209,8 @@ pub fn translate(req: &types::messages::Request) -> Result<Vec<u8>, AIError> {
 	};
 	body.remove("model");
 	body.remove("stream");
+	retain_supported_fields(&mut body);
+	retain_supported_beta_values(&mut body);
 	body
 		.entry("anthropic_version")
 		.or_insert_with(|| serde_json::Value::String(BEDROCK_ANTHROPIC_VERSION.to_string()));
@@ -395,6 +555,114 @@ mod tests {
 		assert!(usage.get("cache_read_input_tokens").is_some());
 		let delta: serde_json::Value = serde_json::from_slice(&events[11].payload).expect("delta");
 		assert!(delta["usage"]["output_tokens"].as_u64().unwrap() > 0);
+	}
+
+	#[test]
+	fn context_management_is_dropped() {
+		// Reported blocker: a full Claude Code request carries context_management, and
+		// Bedrock rejects it with "context_management: Extra inputs are not permitted"
+		// -- unconditionally, including under context-management-2025-06-27 and as an
+		// empty object (probed 2026-08-30). Forwarding it can only ever 400.
+		let mut req = captured_tool_reference_request();
+		req.rest = json!({
+			"context_management": {"edits": [{"type": "clear_tool_uses_20250919"}]}
+		});
+		let body = rendered(&req);
+		assert!(body.get("context_management").is_none(), "got {body}");
+		// The rest of the request must be untouched by the filtering.
+		assert_eq!(
+			body["messages"][0]["content"][0]["content"][0]["type"],
+			json!("tool_reference"),
+			"got {body}"
+		);
+	}
+
+	#[test]
+	fn every_field_bedrock_closes_the_door_on_is_dropped() {
+		// Bedrock closes the top level: each of these returns "<key>: Extra inputs are
+		// not permitted", so they are dropped by omission from the allowlist rather
+		// than blacklisted one incident at a time.
+		let mut req = captured_tool_reference_request();
+		req.rest = json!({
+			"context_management": {"edits": []},
+			"mcp_servers": [],
+			"container": "c-1",
+			"betas": ["advanced-tool-use-2025-11-20"],
+			"tool_search_server": {},
+			"some_field_invented_after_this_build": true
+		});
+		let body = rendered(&req);
+		for key in [
+			"context_management",
+			"mcp_servers",
+			"container",
+			"betas",
+			"tool_search_server",
+			"some_field_invented_after_this_build",
+		] {
+			assert!(body.get(key).is_none(), "{key} should be dropped, got {body}");
+		}
+	}
+
+	#[test]
+	fn schema_valid_fields_are_kept() {
+		// The filter must not overreach. temperature/top_p/top_k are in Bedrock's
+		// schema even though some models reject them as deprecated -- that is a
+		// value-level answer for Bedrock to give, not something to guess at here.
+		let mut req = captured_tool_reference_request();
+		req.rest = json!({
+			"temperature": 0.5,
+			"top_p": 0.9,
+			"top_k": 40,
+			"stop_sequences": ["STOP"],
+			"metadata": {"user_id": "u1"},
+			"thinking": {"type": "disabled"},
+			"output_config": {"effort": "high"},
+			"tool_choice": {"type": "auto"},
+			"tools": []
+		});
+		let body = rendered(&req);
+		for key in [
+			"temperature",
+			"top_p",
+			"top_k",
+			"stop_sequences",
+			"metadata",
+			"thinking",
+			"output_config",
+			"tool_choice",
+			"tools",
+		] {
+			assert!(body.get(key).is_some(), "{key} should survive, got {body}");
+		}
+		assert!(body.get("system").is_none(), "absent fields stay absent: {body}");
+	}
+
+	#[test]
+	fn unrecognized_beta_values_are_filtered_from_the_body() {
+		// Bedrock validates body beta values and uses its own names: tool search is
+		// tool-search-tool-2025-10-19 here, not advanced-tool-use-2025-11-20. An
+		// unfiltered client list would 400 the whole request.
+		let mut req = captured_tool_reference_request();
+		req.rest = json!({
+			"anthropic_beta": ["advanced-tool-use-2025-11-20", "tool-search-tool-2025-10-19"]
+		});
+		let body = rendered(&req);
+		assert_eq!(
+			body["anthropic_beta"],
+			json!(["tool-search-tool-2025-10-19"]),
+			"got {body}"
+		);
+	}
+
+	#[test]
+	fn beta_key_is_removed_when_no_value_survives() {
+		// An empty array would read as "betas explicitly disabled" rather than "the
+		// client asked for betas Bedrock does not know".
+		let mut req = captured_tool_reference_request();
+		req.rest = json!({"anthropic_beta": ["advanced-tool-use-2025-11-20"]});
+		let body = rendered(&req);
+		assert!(body.get("anthropic_beta").is_none(), "got {body}");
 	}
 
 	#[test]
