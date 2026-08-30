@@ -580,24 +580,17 @@ mod tests {
 	fn stream_frames_decode_to_anthropic_events() {
 		let events = decode_fixture();
 		let names: Vec<&str> = events.iter().map(|e| e.event.as_str()).collect();
-		assert_eq!(
-			names,
-			vec![
-				"message_start",
-				"content_block_start",
-				"content_block_delta",
-				"content_block_delta",
-				"content_block_delta",
-				"content_block_delta",
-				"content_block_delta",
-				"content_block_stop",
-				"content_block_start",
-				"content_block_delta",
-				"content_block_stop",
-				"message_delta",
-				"message_stop",
-			]
-		);
+		// Asserted as shape, not as an exact sequence: how many text deltas a model
+		// emits varies per capture, so pinning the count would make re-capturing the
+		// fixture a test failure rather than a refresh.
+		let count = |name: &str| names.iter().filter(|n| **n == name).count();
+		assert_eq!(names.first(), Some(&"message_start"), "got {names:?}");
+		assert_eq!(names.last(), Some(&"message_stop"), "got {names:?}");
+		assert_eq!(count("message_delta"), 1, "got {names:?}");
+		// Two blocks: the model's text, then the tool_use the reference made callable.
+		assert_eq!(count("content_block_start"), 2, "got {names:?}");
+		assert_eq!(count("content_block_stop"), 2, "got {names:?}");
+		assert!(count("content_block_delta") >= 2, "got {names:?}");
 		// Every frame is `:event-type: chunk`, so the name must come from the payload,
 		// not the frame header.
 		for event in &events {
@@ -637,7 +630,14 @@ mod tests {
 		// CacheTokenConvention::InputExcludesCache for Bedrock.
 		assert!(usage["input_tokens"].as_u64().unwrap() > 0);
 		assert!(usage.get("cache_read_input_tokens").is_some());
-		let delta: serde_json::Value = serde_json::from_slice(&events[11].payload).expect("delta");
+		// Located by event name rather than index: a positional lookup would silently
+		// read the wrong frame whenever the model's delta count changes.
+		let delta_event = events
+			.iter()
+			.find(|e| e.event == "message_delta")
+			.expect("a message_delta carries the output count");
+		let delta: serde_json::Value =
+			serde_json::from_slice(&delta_event.payload).expect("delta");
 		assert!(delta["usage"]["output_tokens"].as_u64().unwrap() > 0);
 	}
 
