@@ -3418,7 +3418,7 @@ pub mod from_anthropic_token_count {
 	}
 }
 
-mod helpers {
+pub(crate) mod helpers {
 	use std::collections::HashMap;
 	use std::sync::LazyLock;
 
@@ -3651,6 +3651,14 @@ mod helpers {
 		headers: &http::HeaderMap,
 	) -> Result<Option<Vec<serde_json::Value>>, AIError> {
 		extract_beta_headers_with_allowed(headers, &ALLOWED_BETA_HEADERS)
+	}
+
+	/// The beta values Bedrock is known to accept, for callers that carry the list
+	/// in the request body instead of a header. Bedrock validates these values and
+	/// rejects an unknown one with 400 `invalid beta flag`, so an unfiltered
+	/// client-supplied list is a request-killer.
+	pub fn allowed_beta_values() -> &'static [String] {
+		&ALLOWED_BETA_HEADERS
 	}
 
 	pub fn extract_beta_headers_with_allowed(
