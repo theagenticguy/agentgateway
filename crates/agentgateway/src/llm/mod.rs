@@ -330,7 +330,10 @@ const CHAT_TRANSLATIONS: &[ChatTranslation] = {
 		chat(InputFormat::Completions, ChatFormat::VertexGemini),
 		chat(InputFormat::Completions, ChatFormat::OpenAICompletions),
 		chat(InputFormat::Messages, ChatFormat::AnthropicMessages),
-		// Missing: Bedrock --> Bedrock
+		// Bedrock InvokeModel forwards the Anthropic body untranslated, so it comes
+		// before the Converse entries: Converse silently loses Anthropic features it
+		// has no vocabulary for (deferred tools, tool_reference blocks).
+		chat(InputFormat::Messages, ChatFormat::BedrockInvokeModel),
 		//
 		// Completions
 		chat(InputFormat::Completions, ChatFormat::AnthropicMessages),
@@ -492,6 +495,10 @@ impl ChatTranslation {
 				InputFormat::Responses => custom::ProviderFormat::Responses,
 				_ => unreachable!("chat translation selected for non-chat input"),
 			},
+			// Only reachable for Messages input (see CHAT_TRANSLATIONS); the resulting
+			// RouteType::Messages is what keeps set_default_path reachable, where the
+			// invoke-vs-converse action is chosen from the rendered ProviderState.
+			ChatFormat::BedrockInvokeModel => custom::ProviderFormat::Messages,
 			ChatFormat::VertexGemini => custom::ProviderFormat::GenerateContent,
 		}
 	}
@@ -509,6 +516,17 @@ impl ChatTranslation {
 			},
 			ChatFormat::AnthropicMessages => render_anthropic_messages(req),
 			ChatFormat::BedrockConverse => return render_bedrock_converse(req, ctx),
+			ChatFormat::BedrockInvokeModel => {
+				let types::ChatRequest::Messages(req) = req else {
+					return Err(AIError::UnsupportedConversion(strng::literal!(
+						"bedrock invoke model requires an anthropic messages request"
+					)));
+				};
+				return Ok(RenderedChatRequest {
+					body: conversion::bedrock_invoke::translate(&req)?,
+					provider_state: Some(ProviderState::BedrockInvokeModel),
+				});
+			},
 			ChatFormat::VertexGemini => {
 				return Ok(RenderedChatRequest {
 					body: render_vertex_gemini(req, ctx)?,
@@ -556,6 +574,16 @@ impl ChatTranslation {
 				InputFormat::Completions => {
 					conversion::messages::from_completions::translate_response(bytes)
 				},
+				_ => Err(AIError::UnsupportedConversion(strng::format!(
+					"from {:?} to {:?}",
+					self.output,
+					self.input
+				))),
+			},
+			// The response is already Anthropic-shaped; parsing it keeps unknown blocks
+			// intact rather than translating them.
+			ChatFormat::BedrockInvokeModel => match self.input {
+				InputFormat::Messages => conversion::bedrock_invoke::translate_response(bytes),
 				_ => Err(AIError::UnsupportedConversion(strng::format!(
 					"from {:?} to {:?}",
 					self.output,
@@ -654,6 +682,15 @@ impl ChatTranslation {
 						ctx.logger,
 						ctx.log_content,
 					)
+				}),
+				_ => resp,
+			},
+
+			// AWS event-stream framing in, Anthropic SSE out. The events inside are
+			// already what the client asked for, so they are re-framed, not translated.
+			ChatFormat::BedrockInvokeModel => match self.input {
+				InputFormat::Messages => resp.map(|b| {
+					conversion::bedrock_invoke::translate_stream(b, ctx.buffer_limit, ctx.logger)
 				}),
 				_ => resp,
 			},
@@ -788,6 +825,14 @@ impl ChatTranslation {
 				},
 				ChatErrorFormat::OpenAI => match self.input {
 					InputFormat::Messages => Ok(bytes.clone()),
+					_ => unsupported(),
+				},
+				_ => unsupported(),
+			},
+
+			ChatFormat::BedrockInvokeModel => match format {
+				ChatErrorFormat::Anthropic => match self.input {
+					InputFormat::Messages => conversion::bedrock_invoke::translate_error(bytes, status),
 					_ => unsupported(),
 				},
 				_ => unsupported(),
@@ -978,6 +1023,12 @@ impl AIProvider {
 
 			AIProvider::Gemini(_) => vec![ChatFormat::VertexGemini, ChatFormat::OpenAICompletions],
 			AIProvider::Anthropic(_) => vec![ChatFormat::AnthropicMessages],
+			AIProvider::Bedrock(p) if p.is_anthropic_model(request_model) => {
+				// Anthropic-native InvokeModel first, Converse as the fallback. Only
+				// InvokeModel carries the parts of the Anthropic API that Converse
+				// cannot express, and it needs no per-feature translation to do so.
+				vec![ChatFormat::BedrockInvokeModel, ChatFormat::BedrockConverse]
+			},
 			AIProvider::Bedrock(_) => vec![ChatFormat::BedrockConverse],
 
 			AIProvider::Vertex(p) if p.is_anthropic_model(request_model) => {
@@ -1015,6 +1066,8 @@ impl AIProvider {
 				ChatErrorFormat::Google
 			},
 			(_, ChatFormat::BedrockConverse) => ChatErrorFormat::Bedrock,
+			// InvokeModel returns Anthropic-shaped errors, not Converse-shaped ones.
+			(_, ChatFormat::BedrockInvokeModel) => ChatErrorFormat::Anthropic,
 			(_, ChatFormat::AnthropicMessages) => ChatErrorFormat::Anthropic,
 			(_, ChatFormat::OpenAICompletions | ChatFormat::OpenAIResponses) => ChatErrorFormat::OpenAI,
 			(_, ChatFormat::VertexGemini) => ChatErrorFormat::Google,
@@ -1315,8 +1368,15 @@ impl AIProvider {
 			AIProvider::Bedrock(provider) => http::modify_req(req, |req| {
 				http::modify_uri(req, |uri| {
 					if let Some(l) = llm_request {
-						let path =
-							provider.get_path_for_route(route_type, l.streaming, l.request_model.as_str());
+						// What the body rendered to decides the action, not the model: an
+						// OpenAI-format request to the same Claude model still renders Converse.
+						let invoke_model = matches!(l.provider_state, Some(ProviderState::BedrockInvokeModel));
+						let path = provider.get_path_for_route(
+							route_type,
+							l.streaming,
+							l.request_model.as_str(),
+							invoke_model,
+						);
 						let path = Self::with_path_prefix(&path, path_prefix);
 						Self::set_path_and_query(uri, &path)?;
 					}

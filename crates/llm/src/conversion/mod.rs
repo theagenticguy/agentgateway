@@ -1,4 +1,5 @@
 pub mod bedrock;
+pub mod bedrock_invoke;
 pub mod completions;
 pub mod gemini;
 pub mod messages;

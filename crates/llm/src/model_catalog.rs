@@ -9,6 +9,7 @@ pub mod tags {
 	pub const OPENAI_RESPONSES: &str = "openai_responses";
 	pub const ANTHROPIC_MESSAGES: &str = "anthropic_messages";
 	pub const BEDROCK_CONVERSE: &str = "bedrock_converse";
+	pub const BEDROCK_INVOKE_MODEL: &str = "bedrock_invoke_model";
 	pub const VERTEX_GEMINI: &str = "vertex_gemini";
 }
 

@@ -696,7 +696,11 @@ pub mod from_messages {
 						},
 						messages::ToolResultContentPart::Image { .. }
 						| messages::ToolResultContentPart::Document { .. }
-						| messages::ToolResultContentPart::SearchResult { .. } => {
+						| messages::ToolResultContentPart::SearchResult { .. }
+						// Tool search is an Anthropic-only feature with no Responses equivalent;
+						// refuse rather than silently drop the tools the model was told it has.
+						| messages::ToolResultContentPart::ToolReference { .. }
+						| messages::ToolResultContentPart::Unknown => {
 							return unsupported(
 								"messages non-text tool_result content cannot be represented by responses",
 							);
