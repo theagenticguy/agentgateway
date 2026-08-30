@@ -1368,8 +1368,23 @@ fn test_embeddings_response_titan_embeddings_by_type_fallback() {
 	assert_eq!(openai_resp.usage.unwrap().prompt_tokens, 5);
 }
 
+/// The embedding vector at `index`, read back as f32.
+///
+/// Vectors deserialize as f32 and serialize through serde_json as f64, so 0.1f32
+/// reappears as 0.10000000149011612. Narrowing back to f32 compares the values
+/// the wire actually carried instead of that widening artifact.
+fn embedding_at(resp: &serde_json::Value, index: usize) -> Vec<f32> {
+	resp["data"][index]["embedding"]
+		.as_array()
+		.unwrap_or_else(|| panic!("data[{index}].embedding is not an array: {resp}"))
+		.iter()
+		.map(|v| v.as_f64().expect("embedding component is a number") as f32)
+		.collect()
+}
+
 #[test]
 fn test_embeddings_response_translation_cohere() {
+	// Embed v3 returns `embeddings` as a bare array of vectors.
 	let model = "cohere.embed-english-v3";
 	let bedrock_resp = json!({
 		"embeddings": [[0.1, 0.2, 0.3], [0.4, 0.5, 0.6]],
@@ -1381,13 +1396,94 @@ fn test_embeddings_response_translation_cohere() {
 	headers.insert("x-amzn-bedrock-input-token-count", "10".parse().unwrap());
 
 	let translated = from_embeddings::translate_response(&bytes, &headers, model).unwrap();
-	let openai_resp = translated
+	let openai_resp: serde_json::Value = translated
 		.serialize()
-		.and_then(|b| serde_json::from_slice::<types::embeddings::Response>(&b))
+		.and_then(|b| serde_json::from_slice(&b))
 		.unwrap();
 
-	assert_eq!(openai_resp.object, "list");
-	assert_eq!(openai_resp.usage.unwrap().prompt_tokens, 10);
+	assert_eq!(openai_resp["object"], "list");
+	assert_eq!(embedding_at(&openai_resp, 0), vec![0.1, 0.2, 0.3]);
+	assert_eq!(embedding_at(&openai_resp, 1), vec![0.4, 0.5, 0.6]);
+	assert_eq!(openai_resp["data"][1]["index"], 1);
+	assert_eq!(openai_resp["usage"]["prompt_tokens"], 10);
+}
+
+#[test]
+fn test_embeddings_response_translation_cohere_embed_v4_dtype_map() {
+	// Embed v4 keys `embeddings` by dtype rather than returning a bare array, so
+	// the v3-shaped type rejected every v4 response with
+	// "invalid type: map, expected a sequence".
+	let model = "cohere.embed-v4:0";
+	let bedrock_resp = json!({
+		"embeddings": {"float": [[0.1, 0.2, 0.3], [0.4, 0.5, 0.6]]},
+		"id": "123",
+		"texts": ["hello", "world"],
+		"response_type": "embeddings_by_type"
+	});
+	let bytes = serde_json::to_vec(&bedrock_resp).unwrap();
+	let mut headers = HeaderMap::new();
+	headers.insert("x-amzn-bedrock-input-token-count", "10".parse().unwrap());
+
+	let translated = from_embeddings::translate_response(&bytes, &headers, model).unwrap();
+	let openai_resp: serde_json::Value = translated
+		.serialize()
+		.and_then(|b| serde_json::from_slice(&b))
+		.unwrap();
+
+	assert_eq!(openai_resp["object"], "list");
+	assert_eq!(embedding_at(&openai_resp, 0), vec![0.1, 0.2, 0.3]);
+	assert_eq!(embedding_at(&openai_resp, 1), vec![0.4, 0.5, 0.6]);
+	assert_eq!(openai_resp["data"][1]["index"], 1);
+	assert_eq!(openai_resp["usage"]["prompt_tokens"], 10);
+}
+
+#[test]
+fn test_embeddings_response_translation_cohere_embed_v4_prefers_float() {
+	// An `embedding_types: ["float", "int8"]` request returns both. Only float is
+	// a vector of floats, so it is the one that maps onto OpenAI's `embedding`.
+	let model = "cohere.embed-v4:0";
+	let bedrock_resp = json!({
+		"embeddings": {
+			"float": [[0.1, 0.2, 0.3]],
+			"int8": [[12, -34, 56]],
+		},
+		"id": "123",
+		"texts": ["hello"]
+	});
+	let bytes = serde_json::to_vec(&bedrock_resp).unwrap();
+
+	let translated =
+		from_embeddings::translate_response(&bytes, &HeaderMap::new(), model).unwrap();
+	let openai_resp: serde_json::Value = translated
+		.serialize()
+		.and_then(|b| serde_json::from_slice(&b))
+		.unwrap();
+
+	assert_eq!(openai_resp["data"].as_array().unwrap().len(), 1);
+	assert_eq!(embedding_at(&openai_resp, 0), vec![0.1, 0.2, 0.3]);
+}
+
+#[test]
+fn test_embeddings_response_translation_cohere_embed_v4_without_float_is_rejected() {
+	// Quantized vectors handed back as an OpenAI `embedding` array would silently
+	// return integers where callers expect unit-scale floats. Fail loudly, naming
+	// what the response did carry.
+	let model = "cohere.embed-v4:0";
+	let bedrock_resp = json!({
+		"embeddings": {"int8": [[12, -34, 56]], "binary": [[1, 0, 1]]},
+		"id": "123",
+		"texts": ["hello"]
+	});
+	let bytes = serde_json::to_vec(&bedrock_resp).unwrap();
+
+	// `Box<dyn ResponseType>` is not Debug, so unwrap the error by hand.
+	let err = match from_embeddings::translate_response(&bytes, &HeaderMap::new(), model) {
+		Ok(_) => panic!("a response with no float vectors must not be translated"),
+		Err(e) => e,
+	};
+	let msg = err.to_string();
+	assert!(msg.contains("no 'float' vectors"), "unexpected error: {msg}");
+	assert!(msg.contains("binary, int8"), "error names dtypes: {msg}");
 }
 
 #[test]

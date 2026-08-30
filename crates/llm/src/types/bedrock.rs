@@ -673,9 +673,52 @@ pub struct CohereEmbeddingRequest {
 	pub output_dimension: Option<u32>,
 }
 
+/// The two shapes Cohere Embed returns on Bedrock for the same `embeddings` key.
+///
+/// Embed v3 returns a bare array of vectors. Embed v4 keys its output by dtype,
+/// so a default (float-only) request comes back as `{"float": [[…]]}` and an
+/// `embedding_types: ["float", "int8"]` request adds an `int8` sibling. Untagged
+/// is unambiguous here: a JSON array can only be `ByIndex`, an object only
+/// `ByType`.
+#[derive(Clone, Serialize, Deserialize, Debug)]
+#[serde(untagged)]
+pub enum CohereEmbeddings {
+	/// Embed v3: vectors in request order.
+	ByIndex(Vec<Vec<f32>>),
+	/// Embed v4: vectors in request order, keyed by dtype.
+	ByType(HashMap<String, Vec<Vec<f32>>>),
+}
+
+impl CohereEmbeddings {
+	/// Float vectors in request order.
+	///
+	/// Only `float` is a vector of floats; the other dtypes Embed v4 can emit
+	/// (`int8`, `uint8`, `binary`, `ubinary`) are quantized, and handing those
+	/// back as an OpenAI `embedding` array would silently return integers where
+	/// callers expect unit-scale floats. So a response carrying no `float` is an
+	/// error naming what it did carry, not a best-effort guess.
+	pub fn into_float_vectors(self) -> Result<Vec<Vec<f32>>, String> {
+		match self {
+			Self::ByIndex(vectors) => Ok(vectors),
+			Self::ByType(mut by_type) => by_type.remove("float").ok_or_else(|| {
+				let mut available: Vec<&str> = by_type.keys().map(String::as_str).collect();
+				available.sort_unstable();
+				format!(
+					"Cohere embeddings response has no 'float' vectors (found: {})",
+					if available.is_empty() {
+						"none".to_string()
+					} else {
+						available.join(", ")
+					}
+				)
+			}),
+		}
+	}
+}
+
 #[derive(Clone, Serialize, Deserialize, Debug)]
 pub struct CohereEmbeddingResponse {
-	pub embeddings: Vec<Vec<f32>>,
+	pub embeddings: CohereEmbeddings,
 	pub id: String,
 	pub texts: Vec<String>,
 }

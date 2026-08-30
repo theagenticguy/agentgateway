@@ -829,6 +829,7 @@ mod responses {
 	const EMBEDDING_RESPONSES: &[(&str, &str)] = &[
 		("response/bedrock-titan/embeddings.json", BEDROCK_TITAN),
 		("response/bedrock-cohere/embeddings.json", BEDROCK_COHERE),
+		("response/bedrock-cohere/embeddings-v4.json", BEDROCK_COHERE),
 		("response/bedrock-nova/embeddings.json", BEDROCK_NOVA),
 		("response/vertex/embeddings.json", VERTEX),
 		("response/vertex/embed-content.json", VERTEX_EMBED_CONTENT),
@@ -1046,6 +1047,8 @@ mod responses {
 				BEDROCK_TITAN | BEDROCK_COHERE | BEDROCK_NOVA => {
 					let model = match *provider {
 						BEDROCK_TITAN => "amazon.titan-embed-text-v2:0",
+						// Embed v4 keys `embeddings` by dtype; v3 returns a bare array.
+						BEDROCK_COHERE if path.contains("embeddings-v4") => "cohere.embed-v4:0",
 						BEDROCK_COHERE => "cohere.embed-english-v3",
 						_ => "amazon.nova-2-multimodal-embeddings-v1:0",
 					};

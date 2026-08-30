@@ -470,6 +470,12 @@ pub mod from_embeddings {
 			let resp: types::bedrock::CohereEmbeddingResponse =
 				serde_json::from_slice(bytes).map_err(logged_response_parsing(bytes))?;
 
+			// Embed v3 returns `embeddings` as a bare array, Embed v4 as a map keyed
+			// by dtype; normalize both to float vectors in request order.
+			let embeddings = resp.embeddings.into_float_vectors().map_err(|e| {
+				AIError::ResponseParsing(<serde_json::Error as serde::de::Error>::custom(e))
+			})?;
+
 			// Cohere doesn't include token counts in the JSON body;
 			// Bedrock surfaces them via response headers instead.
 			let prompt_tokens = headers
@@ -480,8 +486,7 @@ pub mod from_embeddings {
 
 			let typed_resp = types::embeddings::typed::Response {
 				object: "list".to_string(),
-				data: resp
-					.embeddings
+				data: embeddings
 					.into_iter()
 					.enumerate()
 					.map(|(i, e)| types::embeddings::typed::Embedding {
