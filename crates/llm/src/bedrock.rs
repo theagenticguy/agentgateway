@@ -39,11 +39,17 @@ impl Provider {
 		model.contains("anthropic.claude")
 	}
 
+	/// `invoke_model` selects the Anthropic-native `InvokeModel` action for chat
+	/// routes. It is driven by what the request actually rendered to
+	/// (`ProviderState::BedrockInvokeModel`), not by the model name: the same
+	/// Claude model still renders to Converse for an OpenAI-format request, and
+	/// pointing that body at `/invoke` would send Bedrock a Converse payload.
 	pub fn get_path_for_route(
 		&self,
 		route_type: super::RouteType,
 		streaming: bool,
 		model: &str,
+		invoke_model: bool,
 	) -> Strng {
 		const MODEL_SEGMENT: &percent_encoding::AsciiSet =
 			&percent_encoding::CONTROLS.add(b'/').add(b'%');
@@ -53,6 +59,10 @@ impl Provider {
 			super::RouteType::Embeddings => strng::format!("/model/{model}/invoke"),
 			// Rerank uses the agent-runtime Rerank action (model goes in the body as an ARN).
 			super::RouteType::Rerank => strng::literal!("/rerank"),
+			_ if invoke_model && streaming => {
+				strng::format!("/model/{model}/invoke-with-response-stream")
+			},
+			_ if invoke_model => strng::format!("/model/{model}/invoke"),
 			_ if streaming => strng::format!("/model/{model}/converse-stream"),
 			_ => strng::format!("/model/{model}/converse"),
 		}

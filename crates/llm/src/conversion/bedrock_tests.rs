@@ -2185,3 +2185,82 @@ fn test_redacted_thinking_round_trips_to_bedrock_request() {
 		other => panic!("expected Redacted reasoning block first, got {other:?}"),
 	}
 }
+
+#[test]
+fn test_tool_result_tool_reference_does_not_reject_the_request() {
+	// Before ToolResultContentPart gained this variant, an untagged-enum mismatch
+	// made the captured block a 400 with no upstream call. Converse still cannot
+	// activate the tools -- only InvokeModel can -- but the request must survive and
+	// carry the names.
+	let provider = Provider {
+		model: Some(strng::new("anthropic.claude-sonnet-4-6")),
+		region: strng::new("us-east-1"),
+		guardrail_identifier: None,
+		guardrail_version: None,
+	};
+	let req: types::messages::Request = serde_json::from_value(json!({
+		"model": "claude-sonnet-4-6",
+		"max_tokens": 100,
+		"messages": [{
+			"role": "user",
+			"content": [{
+				"type": "tool_result",
+				"tool_use_id": "tooluse_36nMoA0hip1UR8bztp3jzT",
+				"content": [
+					{"type": "tool_reference", "tool_name": "mcp__example__list_schedules"},
+					{"type": "tool_reference", "tool_name": "mcp__example__list_schedule_occurrences"}
+				]
+			}]
+		}]
+	}))
+	.unwrap();
+
+	let translated = super::from_messages::translate(&req, &provider, None)
+		.expect("a tool_reference block must not fail the request");
+	let body: serde_json::Value = serde_json::from_slice(&translated.body).unwrap();
+	let content = &body["messages"][0]["content"][0]["toolResult"]["content"];
+	assert_eq!(
+		content,
+		&json!([
+			{"json": {"type": "tool_reference", "tool_name": "mcp__example__list_schedules"}},
+			{"json": {"type": "tool_reference", "tool_name": "mcp__example__list_schedule_occurrences"}}
+		]),
+		"got {body}"
+	);
+}
+
+#[test]
+fn test_unknown_tool_result_part_is_dropped_not_rejected() {
+	// A content type this build predates must cost the block, never the request.
+	let provider = Provider {
+		model: Some(strng::new("anthropic.claude-sonnet-4-6")),
+		region: strng::new("us-east-1"),
+		guardrail_identifier: None,
+		guardrail_version: None,
+	};
+	let req: types::messages::Request = serde_json::from_value(json!({
+		"model": "claude-sonnet-4-6",
+		"max_tokens": 100,
+		"messages": [{
+			"role": "user",
+			"content": [{
+				"type": "tool_result",
+				"tool_use_id": "tooluse_1",
+				"content": [
+					{"type": "some_future_block_type", "whatever": 1},
+					{"type": "text", "text": "kept"}
+				]
+			}]
+		}]
+	}))
+	.unwrap();
+
+	let translated = super::from_messages::translate(&req, &provider, None)
+		.expect("an unknown tool_result part must not fail the request");
+	let body: serde_json::Value = serde_json::from_slice(&translated.body).unwrap();
+	assert_eq!(
+		&body["messages"][0]["content"][0]["toolResult"]["content"],
+		&json!([{"text": "kept"}]),
+		"got {body}"
+	);
+}

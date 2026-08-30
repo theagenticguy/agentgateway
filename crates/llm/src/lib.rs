@@ -227,6 +227,14 @@ pub enum ChatFormat {
 	OpenAIResponses,
 	AnthropicMessages,
 	BedrockConverse,
+	/// Bedrock `InvokeModel`, carrying an Anthropic-native body rather than a
+	/// Converse one. Converse has no vocabulary for several Anthropic features —
+	/// deferred tool loading (`defer_loading`) and the `tool_reference` blocks
+	/// tool search returns among them — so translating through it drops them.
+	/// This format forwards the request untranslated instead, which is also why
+	/// it must stay on the passthrough-safe `types::messages` structs rather than
+	/// the narrower `types::messages::typed` ones.
+	BedrockInvokeModel,
 	VertexGemini,
 }
 
@@ -238,6 +246,7 @@ impl ChatFormat {
 			ChatFormat::OpenAIResponses => tags::OPENAI_RESPONSES,
 			ChatFormat::AnthropicMessages => tags::ANTHROPIC_MESSAGES,
 			ChatFormat::BedrockConverse => tags::BEDROCK_CONVERSE,
+			ChatFormat::BedrockInvokeModel => tags::BEDROCK_INVOKE_MODEL,
 			ChatFormat::VertexGemini => tags::VERTEX_GEMINI,
 		}
 	}
@@ -264,6 +273,12 @@ pub enum ProviderState {
 	Bedrock {
 		tool_names: Arc<conversion::bedrock::BedrockToolNameMap>,
 	},
+	/// The request rendered to an Anthropic-native body, so it must go to
+	/// `/model/{id}/invoke` rather than `/converse`. Path selection happens after
+	/// rendering and cannot re-derive the choice from the model alone — an
+	/// OpenAI-format request to the same Claude model still renders to Converse —
+	/// so the decision rides here.
+	BedrockInvokeModel,
 	VertexGemini,
 }
 

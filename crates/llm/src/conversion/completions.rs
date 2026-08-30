@@ -849,11 +849,15 @@ pub mod from_messages {
 												)),
 												ToolResultContentPart::Image { cache_control, .. }
 												| ToolResultContentPart::Document { cache_control, .. }
-												| ToolResultContentPart::SearchResult { cache_control, .. } => {
+												| ToolResultContentPart::SearchResult { cache_control, .. }
+												// A tool reference names a tool rather than carrying content, so it has
+												// no OpenAI tool-message part; only its cache breakpoint still applies.
+												| ToolResultContentPart::ToolReference { cache_control, .. } => {
 													if supports_prompt_cache_breakpoint {
 														trailing_cache_control = trailing_cache_control.or(cache_control);
 													}
 												},
+												ToolResultContentPart::Unknown => {},
 											}
 										}
 										if let Some(cache_control) = trailing_cache_control {

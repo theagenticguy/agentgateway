@@ -795,6 +795,20 @@ pub mod typed {
 			#[serde(skip_serializing_if = "Option::is_none")]
 			cache_control: Option<CacheControlEphemeral>,
 		},
+		/// A tool the model may now call, returned by tool search under
+		/// `advanced-tool-use`. Carries no content: it names a tool whose schema the
+		/// API attaches server-side.
+		ToolReference {
+			tool_name: String,
+			#[serde(skip_serializing_if = "Option::is_none")]
+			cache_control: Option<CacheControlEphemeral>,
+		},
+		/// Matches the tolerance `ContentBlock` already has. Without this, one
+		/// unrecognized tool-result part fails the untagged parent and rejects the
+		/// whole request, so a content type this build predates becomes a 400 rather
+		/// than a dropped block.
+		#[serde(other)]
+		Unknown,
 	}
 
 	#[derive(Clone, Deserialize, Serialize, Debug, PartialEq, Eq)]

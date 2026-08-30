@@ -11,6 +11,8 @@ pub mod tags {
 	pub const ANTHROPIC_MESSAGES: &str = "anthropic_messages";
 	/// Accepts Amazon Bedrock's Converse request format.
 	pub const BEDROCK_CONVERSE: &str = "bedrock_converse";
+	/// Accepts Anthropic-native requests forwarded to Bedrock InvokeModel (anthropic.claude* only).
+	pub const BEDROCK_INVOKE_MODEL: &str = "bedrock_invoke_model";
 	/// Accepts OpenAI's Chat Completions request format.
 	pub const OPENAI_COMPLETIONS: &str = "openai_completions";
 	/// Accepts OpenAI's Responses request format.

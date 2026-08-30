@@ -1732,8 +1732,23 @@ pub mod from_messages {
 											None
 										}
 									},
+									// Converse has no tool-reference member, so the names ride as JSON
+									// rather than vanishing. This does NOT make the tools callable --
+									// only InvokeModel can attach their schemas -- but it keeps the
+									// request valid and the information visible instead of 400ing.
+									messages::ToolResultContentPart::ToolReference {
+										tool_name,
+										cache_control,
+									} => {
+										has_cache_control |= cache_control.is_some();
+										Some(bedrock::ToolResultContentBlock::Json(serde_json::json!({
+											"type": "tool_reference",
+											"tool_name": tool_name,
+										})))
+									},
 									messages::ToolResultContentPart::Document { .. }
-									| messages::ToolResultContentPart::SearchResult { .. } => None,
+									| messages::ToolResultContentPart::SearchResult { .. }
+									| messages::ToolResultContentPart::Unknown => None,
 								})
 								.collect(),
 						};
