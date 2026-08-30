@@ -3436,6 +3436,11 @@ pub(crate) mod helpers {
 		"effort-2025-11-24",
 		"tool-search-tool-2025-10-19",
 		"tool-examples-2025-10-29",
+		// Captured 2026-08-30 from Claude Code addressing Bedrock directly, which
+		// sends both in `anthropic_beta` and is answered 200; the documented list
+		// above omits them.
+		"mid-conversation-system-2026-04-07",
+		"fallback-credit-2026-06-01",
 	];
 	const ALLOWED_BETA_HEADERS_ENV: &str = "AGENTGATEWAY_BEDROCK_ANTHROPIC_BETA_HEADERS";
 	const DEFAULT_SENTINEL: &str = "default";
