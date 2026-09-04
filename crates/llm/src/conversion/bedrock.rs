@@ -78,6 +78,43 @@ fn anthropic_reasoning_fields(
 	)
 }
 
+/// Fill in the fields OpenAI marks optional on replayed assistant output but the typed
+/// `OutputMessage` requires. Codex CLI replays a prior turn's assistant message as
+/// `{"type":"message","role":"assistant","content":[{"type":"output_text","text":...}]}`
+/// with no `status` and no `annotations`; OpenAI and Bedrock's OpenAI-compatible endpoint
+/// accept that, while the strict typed conversion rejected the whole request with
+/// "data did not match any variant of untagged enum InputParam". Only assistant messages
+/// are touched, and only missing fields are added.
+fn normalize_replayed_assistant_messages(input: &mut serde_json::Value) {
+	let Some(items) = input.as_array_mut() else {
+		return;
+	};
+	for item in items.iter_mut() {
+		let Some(obj) = item.as_object_mut() else {
+			continue;
+		};
+		let is_assistant_message = obj.get("type").and_then(|t| t.as_str()) == Some("message")
+			&& obj.get("role").and_then(|r| r.as_str()) == Some("assistant");
+		if !is_assistant_message {
+			continue;
+		}
+		obj
+			.entry("status")
+			.or_insert_with(|| serde_json::Value::String("completed".to_string()));
+		if let Some(parts) = obj.get_mut("content").and_then(|c| c.as_array_mut()) {
+			for part in parts.iter_mut() {
+				if let Some(part) = part.as_object_mut()
+					&& part.get("type").and_then(|t| t.as_str()) == Some("output_text")
+				{
+					part
+						.entry("annotations")
+						.or_insert_with(|| serde_json::Value::Array(Vec::new()));
+				}
+			}
+		}
+	}
+}
+
 /// Per-request mapping between client tool names and Bedrock-safe tool names.
 #[derive(Debug, Clone, Default)]
 pub struct BedrockToolNameMap {
@@ -2391,8 +2428,12 @@ pub mod from_responses {
 		prompt_caching: Option<&crate::PromptCachingConfig>,
 		catalog: crate::model_catalog::Catalog<'_>,
 	) -> Result<super::BedrockRequest, AIError> {
-		let typed =
-			json::convert::<_, responses::CreateResponse>(req).map_err(AIError::RequestMarshal)?;
+		let mut raw = serde_json::to_value(req).map_err(AIError::RequestMarshal)?;
+		if let Some(input) = raw.get_mut("input") {
+			super::normalize_replayed_assistant_messages(input);
+		}
+		let typed: responses::CreateResponse =
+			serde_json::from_value(raw).map_err(AIError::RequestMarshal)?;
 		let explicit_thinking_budget = extract_responses_thinking_budget_tokens(req);
 		let model_id = typed.model.clone().unwrap_or_default();
 		let (xlated, tool_name_map) = translate_internal(

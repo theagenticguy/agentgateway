@@ -2378,3 +2378,40 @@ fn test_responses_reasoning_effort_on_claude_bedrock_model_still_maps_to_thinkin
 	assert!(fields.get("thinking").is_some(), "got {fields}");
 	assert!(fields.get("reasoning").is_none(), "got {fields}");
 }
+
+#[test]
+fn test_responses_replayed_assistant_message_without_status_or_annotations_is_accepted() {
+	// Codex CLI's second turn, captured 2026-09-04: the assistant message it replays carries
+	// neither `status` nor `annotations`, which the typed OutputMessage requires.
+	let req: types::responses::Request = serde_json::from_value(json!({
+		"model": "global.openai.gpt-5.6-sol",
+		"max_output_tokens": 64,
+		"tools": [{
+			"type": "function",
+			"name": "exec_command",
+			"description": "Run a command",
+			"parameters": {"type": "object", "properties": {"cmd": {"type": "string"}}},
+			"strict": false
+		}],
+		"input": [
+			{"type": "message", "id": "msg_1", "role": "developer", "content": [{"type": "input_text", "text": "Be brief."}]},
+			{"type": "message", "id": "msg_2", "role": "user", "content": [{"type": "input_text", "text": "How many entries in harbor?"}]},
+			{"type": "function_call", "id": "call_1", "call_id": "call_1", "name": "exec_command", "arguments": "{\"cmd\":\"ls harbor | wc -l\"}"},
+			{"type": "message", "id": "msg_3", "role": "assistant", "content": [{"type": "output_text", "text": "I'll list harbor and count the entries."}]},
+			{"type": "function_call_output", "id": "fco_1", "call_id": "call_1", "output": "6\n"}
+		]
+	}))
+	.expect("valid responses request");
+
+	let body = super::from_responses::translate(&req, &reasoning_test_provider(), None, None, None)
+		.expect("replayed assistant message must translate")
+		.body;
+	let translated: serde_json::Value = serde_json::from_slice(&body).unwrap();
+	let rendered = translated.to_string();
+	assert!(
+		rendered.contains("I'll list harbor and count the entries."),
+		"got {rendered}"
+	);
+	assert!(rendered.contains("toolUse"), "got {rendered}");
+	assert!(rendered.contains("toolResult"), "got {rendered}");
+}
