@@ -24,12 +24,28 @@ pub struct BedrockRequest {
 	pub tool_name_map: BedrockToolNameMap,
 }
 
+/// Reasoning controls for Bedrock's `additionalModelRequestFields`, shaped per vendor.
+///
+/// OpenAI-vended models on Bedrock (`openai.gpt-5.6-*` inference profiles, `openai.gpt-oss-*`)
+/// take `reasoning.effort` and reject Anthropic's `thinking` object with
+/// `unknown_parameter: 'thinking'` (probed live 2026-09-01 against global.openai.gpt-5.6-terra
+/// and openai.gpt-oss-20b-1:0, and 2026-09-04 against global.openai.gpt-5.6-sol). Every other
+/// model keeps the Anthropic thinking mapping. The bool reports whether manual (budgeted)
+/// thinking is on, which is incompatible with custom sampling parameters.
 fn anthropic_reasoning_fields(
 	model: &str,
 	catalog: crate::model_catalog::Catalog<'_>,
 	explicit_budget: Option<u64>,
 	effort: Option<messages::typed::ThinkingEffort>,
 ) -> (Option<serde_json::Value>, bool) {
+	if helpers::is_openai_model(model) {
+		let fields = effort.map(|effort| {
+			serde_json::json!({
+				"reasoning": { "effort": helpers::openai_reasoning_effort_name(effort) }
+			})
+		});
+		return (fields, false);
+	}
 	let capabilities = crate::model_catalog::anthropic_thinking_capabilities(model, catalog);
 	if let Some(budget_tokens) = explicit_budget
 		&& capabilities.legacy
@@ -3607,6 +3623,29 @@ pub(crate) mod helpers {
 		}
 		target.push_cache_point(create_cache_point());
 		*cache_points_used += 1;
+	}
+
+	/// OpenAI-vended models on Bedrock: the `openai.gpt-5.6-*` inference profiles and the
+	/// `openai.gpt-oss-*` on-demand models. Their Converse `additionalModelRequestFields`
+	/// follow OpenAI's request shape, not Anthropic's.
+	pub fn is_openai_model(model_id: &str) -> bool {
+		model_id.to_lowercase().contains("openai.")
+	}
+
+	/// The `reasoning.effort` value Bedrock accepts for OpenAI models: one of
+	/// `none | low | medium | high | xhigh | max` (Bedrock's own error text enumerates the set).
+	/// Callers have already collapsed OpenAI's `none` to no effort and `minimal` to `Low`.
+	pub fn openai_reasoning_effort_name(
+		effort: crate::types::messages::typed::ThinkingEffort,
+	) -> &'static str {
+		use crate::types::messages::typed::ThinkingEffort;
+		match effort {
+			ThinkingEffort::Low => "low",
+			ThinkingEffort::Medium => "medium",
+			ThinkingEffort::High => "high",
+			ThinkingEffort::Xhigh => "xhigh",
+			ThinkingEffort::Max => "max",
+		}
 	}
 
 	pub fn supports_prompt_caching(model_id: &str) -> bool {

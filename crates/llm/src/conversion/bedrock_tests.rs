@@ -2176,7 +2176,7 @@ fn test_redacted_thinking_round_trips_to_bedrock_request() {
 		output_config: None,
 	};
 
-	let (out, _) = super::from_messages::translate_internal(req, &provider, None).unwrap();
+	let (out, _) = super::from_messages::translate_internal(req, &provider, None, None).unwrap();
 	let assistant_content = &out.messages[1].content;
 	match &assistant_content[0] {
 		types::bedrock::ContentBlock::ReasoningContent(
@@ -2215,7 +2215,7 @@ fn test_tool_result_tool_reference_does_not_reject_the_request() {
 	}))
 	.unwrap();
 
-	let translated = super::from_messages::translate(&req, &provider, None)
+	let translated = super::from_messages::translate(&req, &provider, None, None)
 		.expect("a tool_reference block must not fail the request");
 	let body: serde_json::Value = serde_json::from_slice(&translated.body).unwrap();
 	let content = &body["messages"][0]["content"][0]["toolResult"]["content"];
@@ -2255,7 +2255,7 @@ fn test_unknown_tool_result_part_is_dropped_not_rejected() {
 	}))
 	.unwrap();
 
-	let translated = super::from_messages::translate(&req, &provider, None)
+	let translated = super::from_messages::translate(&req, &provider, None, None)
 		.expect("an unknown tool_result part must not fail the request");
 	let body: serde_json::Value = serde_json::from_slice(&translated.body).unwrap();
 	assert_eq!(
@@ -2263,4 +2263,118 @@ fn test_unknown_tool_result_part_is_dropped_not_rejected() {
 		&json!([{"text": "kept"}]),
 		"got {body}"
 	);
+}
+
+fn reasoning_effort_request(model: &str, effort: &str) -> types::completions::Request {
+	serde_json::from_value(json!({
+		"model": model,
+		"reasoning_effort": effort,
+		"max_completion_tokens": 512,
+		"messages": [{ "role": "user", "content": "hello" }]
+	}))
+	.expect("valid completions request")
+}
+
+fn responses_reasoning_effort_request(model: &str, effort: &str) -> types::responses::Request {
+	serde_json::from_value(json!({
+		"model": model,
+		"reasoning": { "effort": effort },
+		"max_output_tokens": 512,
+		"input": "hello"
+	}))
+	.expect("valid responses request")
+}
+
+fn reasoning_test_provider() -> Provider {
+	Provider {
+		model: None,
+		region: strng::new("us-east-1"),
+		guardrail_identifier: None,
+		guardrail_version: None,
+	}
+}
+
+fn translated_additional_fields(model: &str, effort: &str) -> serde_json::Value {
+	let body = super::from_completions::translate(
+		&reasoning_effort_request(model, effort),
+		&reasoning_test_provider(),
+		None,
+		None,
+		None,
+	)
+	.unwrap()
+	.body;
+	let translated: serde_json::Value = serde_json::from_slice(&body).unwrap();
+	translated["additionalModelRequestFields"].clone()
+}
+
+fn responses_translated_additional_fields(model: &str, effort: &str) -> serde_json::Value {
+	let body = super::from_responses::translate(
+		&responses_reasoning_effort_request(model, effort),
+		&reasoning_test_provider(),
+		None,
+		None,
+		None,
+	)
+	.unwrap()
+	.body;
+	let translated: serde_json::Value = serde_json::from_slice(&body).unwrap();
+	translated["additionalModelRequestFields"].clone()
+}
+
+#[test]
+fn test_completions_reasoning_effort_on_openai_bedrock_model_maps_to_reasoning_effort_field() {
+	let fields = translated_additional_fields("global.openai.gpt-5.6-terra", "medium");
+	assert_eq!(fields, json!({ "reasoning": { "effort": "medium" } }));
+	assert!(fields.get("thinking").is_none());
+}
+
+#[test]
+fn test_completions_reasoning_effort_minimal_on_openai_bedrock_model_maps_to_low() {
+	let fields = translated_additional_fields("openai.gpt-oss-120b-1:0", "minimal");
+	assert_eq!(fields, json!({ "reasoning": { "effort": "low" } }));
+}
+
+#[test]
+fn test_completions_reasoning_effort_none_on_openai_bedrock_model_sends_no_reasoning_fields() {
+	let fields = translated_additional_fields("us.openai.gpt-5.6-sol", "none");
+	assert!(fields.is_null(), "got {fields}");
+}
+
+#[test]
+fn test_completions_reasoning_effort_on_claude_bedrock_model_still_maps_to_thinking_budget() {
+	let fields = translated_additional_fields("global.anthropic.claude-sonnet-5", "medium");
+	assert_eq!(
+		fields,
+		json!({ "thinking": { "type": "enabled", "budget_tokens": 2048 } })
+	);
+	assert!(fields.get("reasoning").is_none());
+}
+
+#[test]
+fn test_responses_reasoning_effort_on_openai_bedrock_model_maps_to_reasoning_effort_field() {
+	// Codex CLI sends `reasoning: {effort}` on every turn against gpt-5.6; the gateway used to
+	// translate it into Anthropic's `thinking` object, which Bedrock rejects for OpenAI models.
+	let fields = responses_translated_additional_fields("global.openai.gpt-5.6-sol", "high");
+	assert_eq!(fields, json!({ "reasoning": { "effort": "high" } }));
+	assert!(fields.get("thinking").is_none());
+}
+
+#[test]
+fn test_responses_reasoning_effort_minimal_on_openai_bedrock_model_maps_to_low() {
+	let fields = responses_translated_additional_fields("openai.gpt-oss-120b-1:0", "minimal");
+	assert_eq!(fields, json!({ "reasoning": { "effort": "low" } }));
+}
+
+#[test]
+fn test_responses_reasoning_effort_none_on_openai_bedrock_model_sends_no_reasoning_fields() {
+	let fields = responses_translated_additional_fields("us.openai.gpt-5.6-sol", "none");
+	assert!(fields.is_null(), "got {fields}");
+}
+
+#[test]
+fn test_responses_reasoning_effort_on_claude_bedrock_model_still_maps_to_thinking() {
+	let fields = responses_translated_additional_fields("global.anthropic.claude-sonnet-5", "medium");
+	assert!(fields.get("thinking").is_some(), "got {fields}");
+	assert!(fields.get("reasoning").is_none(), "got {fields}");
 }
