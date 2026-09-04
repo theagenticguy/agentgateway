@@ -2295,7 +2295,7 @@ pub mod from_responses {
 		ResponseContentPartAddedEvent, ResponseContentPartDoneEvent, ResponseErrorEvent,
 		ResponseFunctionCallArgumentsDeltaEvent, ResponseFunctionCallArgumentsDoneEvent,
 		ResponseOutputItemAddedEvent, ResponseOutputItemDoneEvent, ResponseStreamEvent,
-		ResponseTextDeltaEvent, ResponseUsage,
+		ResponseTextDeltaEvent, ResponseTextDoneEvent, ResponseUsage,
 	};
 	use types::bedrock;
 	use types::responses::typed as responses;
@@ -3103,6 +3103,11 @@ pub mod from_responses {
 
 		// Track message item ID for text content
 		let message_item_id = format!("msg_{:016x}", rand::rng().random::<u64>());
+		// Converse streams text blocks without a ContentBlockStart, so the text part is opened
+		// on the first delta and its accumulated text is replayed in the done events. Reasoning
+		// deltas are not message text and stay out of this buffer.
+		let mut message_text = String::new();
+		let mut text_part_open = false;
 		let model = model.to_string();
 
 		let response_builder = crate::types::responses::ResponseBuilder::new(response_id, model);
@@ -3238,6 +3243,22 @@ pub mod from_responses {
 								if let Some(completion) = completion.as_mut() {
 									completion.push_str(&text);
 								}
+								if !text_part_open {
+									text_part_open = true;
+									seen_blocks.insert(delta.content_block_index);
+									sequence_number += 1;
+									out.push((
+										"event",
+										ResponseStreamEvent::ResponseContentPartAdded(ResponseContentPartAddedEvent {
+											sequence_number,
+											item_id: message_item_id.clone(),
+											output_index: 0,
+											content_index: 0,
+											part: make_output_part(String::new()),
+										}),
+									));
+								}
+								message_text.push_str(&text);
 								sequence_number += 1;
 								let delta_event =
 									ResponseStreamEvent::ResponseOutputTextDelta(ResponseTextDeltaEvent {
@@ -3340,6 +3361,21 @@ pub mod from_responses {
 							});
 						events.push(("event", item_done_event));
 					} else if was_tracked {
+						if text_part_open {
+							text_part_open = false;
+							sequence_number += 1;
+							events.push((
+								"event",
+								ResponseStreamEvent::ResponseOutputTextDone(ResponseTextDoneEvent {
+									sequence_number,
+									item_id: message_item_id.clone(),
+									output_index: 0,
+									content_index: 0,
+									text: message_text.clone(),
+									logprobs: None,
+								}),
+							));
+						}
 						sequence_number += 1;
 						let part_done_event =
 							ResponseStreamEvent::ResponseContentPartDone(ResponseContentPartDoneEvent {
@@ -3347,7 +3383,7 @@ pub mod from_responses {
 								item_id: message_item_id.clone(),
 								output_index: 0,
 								content_index: 0,
-								part: make_output_part(String::new()),
+								part: make_output_part(message_text.clone()),
 							});
 						events.push(("event", part_done_event));
 					}
@@ -3385,7 +3421,19 @@ pub mod from_responses {
 							sequence_number,
 							output_index: 0,
 							item: OutputItem::Message(OutputMessage {
-								content: Vec::new(),
+								content: if message_text.is_empty() {
+									Vec::new()
+								} else {
+									vec![
+										crate::types::responses::typed::OutputMessageContent::OutputText(
+											OutputTextContent {
+												annotations: Vec::new(),
+												logprobs: None,
+												text: message_text.clone(),
+											},
+										),
+									]
+								},
 								id: message_item_id.clone(),
 								role: AssistantRole::Assistant,
 								phase: None,
