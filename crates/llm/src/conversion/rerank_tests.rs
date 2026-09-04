@@ -36,7 +36,12 @@ fn test_bedrock_rerank_uses_agent_runtime_host_and_rerank_path() {
 	);
 	assert_eq!(
 		provider
-			.get_path_for_route(crate::RouteType::Rerank, false, "cohere.rerank-v3-5:0", false)
+			.get_path_for_route(
+				crate::RouteType::Rerank,
+				false,
+				"cohere.rerank-v3-5:0",
+				false
+			)
 			.as_str(),
 		"/rerank"
 	);

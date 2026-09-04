@@ -92,29 +92,30 @@ const DEFAULT_SENTINEL: &str = "default";
 
 /// `AGENTGATEWAY_BEDROCK_INVOKE_BODY_FIELDS` overrides the allowlist, so a field
 /// Bedrock starts accepting can be let through without a new build.
-static ALLOWED_BODY_FIELDS: LazyLock<HashSet<String>> = LazyLock::new(|| {
-	match std::env::var("AGENTGATEWAY_BEDROCK_INVOKE_BODY_FIELDS") {
-		Ok(raw) => raw
-			.split(',')
-			.map(str::trim)
-			.filter(|f| !f.is_empty())
-			.flat_map(|f| {
-				if f == DEFAULT_SENTINEL {
-					DEFAULT_INVOKE_BODY_FIELDS
-						.iter()
-						.map(|s| s.to_string())
-						.collect::<Vec<_>>()
-				} else {
-					vec![f.to_string()]
-				}
-			})
-			.collect(),
-		Err(_) => DEFAULT_INVOKE_BODY_FIELDS
-			.iter()
-			.map(|s| s.to_string())
-			.collect(),
-	}
-});
+static ALLOWED_BODY_FIELDS: LazyLock<HashSet<String>> =
+	LazyLock::new(
+		|| match std::env::var("AGENTGATEWAY_BEDROCK_INVOKE_BODY_FIELDS") {
+			Ok(raw) => raw
+				.split(',')
+				.map(str::trim)
+				.filter(|f| !f.is_empty())
+				.flat_map(|f| {
+					if f == DEFAULT_SENTINEL {
+						DEFAULT_INVOKE_BODY_FIELDS
+							.iter()
+							.map(|s| s.to_string())
+							.collect::<Vec<_>>()
+					} else {
+						vec![f.to_string()]
+					}
+				})
+				.collect(),
+			Err(_) => DEFAULT_INVOKE_BODY_FIELDS
+				.iter()
+				.map(|s| s.to_string())
+				.collect(),
+		},
+	);
 
 /// Field names already reported, so a dropped field is named once rather than on
 /// every request. Bounded by the allowlist's complement, which is tiny in practice.
@@ -140,7 +141,10 @@ fn retain_supported_fields(body: &mut serde_json::Map<String, serde_json::Value>
 	}
 	let fresh: Vec<&String> = {
 		let mut reported = REPORTED_DROPS.lock().expect("drop set is never poisoned");
-		dropped.iter().filter(|f| reported.insert((*f).clone())).collect()
+		dropped
+			.iter()
+			.filter(|f| reported.insert((*f).clone()))
+			.collect()
 	};
 	if !fresh.is_empty() {
 		warn!(
@@ -177,10 +181,8 @@ const BETA_RENAMES: &[(&str, &str)] = &[(
 /// cannot see. Scoped deliberately to fields the filter itself drops: a beta whose
 /// companion field is merely absent may still apply legitimately, so requiring a
 /// field the client simply did not send would be a guess.
-const BETA_REQUIRES_FIELD: &[(&str, &str)] = &[(
-	"context-management-2025-06-27",
-	"context_management",
-)];
+const BETA_REQUIRES_FIELD: &[(&str, &str)] =
+	&[("context-management-2025-06-27", "context_management")];
 
 /// Settle `anthropic_beta` from both the body and the `anthropic-beta` header.
 ///
@@ -237,7 +239,7 @@ fn merge_beta_values(
 	let mut seen: HashSet<String> = HashSet::new();
 	let mut dropped: Vec<String> = Vec::new();
 	for value in from_body.into_iter().chain(from_header) {
-		if !allowed.iter().any(|a| *a == value) || orphaned(&value) {
+		if !allowed.contains(&value) || orphaned(&value) {
 			if !dropped.contains(&value) {
 				dropped.push(value);
 			}
@@ -357,11 +359,7 @@ impl InvokeStreamEvent {
 /// framing differs (AWS event-stream in, SSE out). Each event's bytes are
 /// forwarded verbatim so an event type this build does not know still reaches the
 /// client — the usage parse below is observation-only and never gates output.
-pub fn translate_stream(
-	b: Body,
-	buffer_limit: usize,
-	mut log: StreamingUsageGuard,
-) -> Body {
+pub fn translate_stream(b: Body, buffer_limit: usize, mut log: StreamingUsageGuard) -> Body {
 	aws_sse::transform_multi(b, buffer_limit, move |frame| {
 		let event = match InvokeStreamEvent::deserialize(frame) {
 			Ok(event) => event,
@@ -560,7 +558,10 @@ mod tests {
 		let mut req = captured_tool_reference_request();
 		req.rest = json!({"anthropic_version": "bedrock-2023-05-31-custom"});
 		let body = rendered(&req);
-		assert_eq!(body["anthropic_version"], json!("bedrock-2023-05-31-custom"));
+		assert_eq!(
+			body["anthropic_version"],
+			json!("bedrock-2023-05-31-custom")
+		);
 	}
 
 	/// Decode every frame of a real `invoke-with-response-stream` capture.
@@ -636,8 +637,7 @@ mod tests {
 			.iter()
 			.find(|e| e.event == "message_delta")
 			.expect("a message_delta carries the output count");
-		let delta: serde_json::Value =
-			serde_json::from_slice(&delta_event.payload).expect("delta");
+		let delta: serde_json::Value = serde_json::from_slice(&delta_event.payload).expect("delta");
 		assert!(delta["usage"]["output_tokens"].as_u64().unwrap() > 0);
 	}
 
@@ -684,7 +684,10 @@ mod tests {
 			"tool_search_server",
 			"some_field_invented_after_this_build",
 		] {
-			assert!(body.get(key).is_none(), "{key} should be dropped, got {body}");
+			assert!(
+				body.get(key).is_none(),
+				"{key} should be dropped, got {body}"
+			);
 		}
 	}
 
@@ -719,7 +722,10 @@ mod tests {
 		] {
 			assert!(body.get(key).is_some(), "{key} should survive, got {body}");
 		}
-		assert!(body.get("system").is_none(), "absent fields stay absent: {body}");
+		assert!(
+			body.get("system").is_none(),
+			"absent fields stay absent: {body}"
+		);
 	}
 
 	#[test]
@@ -787,7 +793,11 @@ mod tests {
 			&captured_tool_reference_request(),
 			&beta_headers(&["claude-code-20250219", "context-1m-2025-08-07"]),
 		);
-		assert_eq!(body["anthropic_beta"], json!(["context-1m-2025-08-07"]), "got {body}");
+		assert_eq!(
+			body["anthropic_beta"],
+			json!(["context-1m-2025-08-07"]),
+			"got {body}"
+		);
 	}
 
 	#[test]
@@ -819,7 +829,11 @@ mod tests {
 			&beta_headers(&["context-management-2025-06-27,context-1m-2025-08-07"]),
 		);
 		assert!(body.get("context_management").is_none(), "got {body}");
-		assert_eq!(body["anthropic_beta"], json!(["context-1m-2025-08-07"]), "got {body}");
+		assert_eq!(
+			body["anthropic_beta"],
+			json!(["context-1m-2025-08-07"]),
+			"got {body}"
+		);
 	}
 
 	#[test]
